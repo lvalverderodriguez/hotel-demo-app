@@ -1,0 +1,21 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: deployer
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        type: string
+        required: true
+      manifest:
+        type: string
+        required: true
+
+jobs:
+  hotel-demo:
+    if: ${{ fromJSON(inputs.manifest)['hotel-demo']['hotel-demo'].deploy }}
+    uses: lvalverderodriguez/hotel-demo/.cloudbees/workflows/deploy.yaml
+    with:
+      artifact-id: ${{ fromJSON(inputs.manifest)['hotel-demo']['hotel-demo'].id }}
+      environment: ${{ inputs.environment }}
