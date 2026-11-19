@@ -10,13 +10,13 @@ on:
         description: This is a system-generated parameter and is required for use in application releases. Refer to https://docs.cloudbees.com/docs/cloudbees-platform/latest/applications/releases#manifest for the expected format
 metadata:
   stages/v1alpha1:
-    - name: staging-lola
+    - name: pro-lola
       jobs:
-        - staging-lola
+        - pro-lola
 jobs:
-  staging-lola:
-    environment: staging-lola
+  pro-lola:
     uses: ./.cloudbees/workflows/deployer.yaml
+    environment: pro-lola
     with:
       manifest: ${{ inputs.manifest }}
       environment: ${{ job.environment }}
