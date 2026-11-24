@@ -1,0 +1,64 @@
+# Application workflow: .cloudbees/workflows/release-staged.yaml
+# Staged release workflow (run from an application release; receives the release manifest):
+#   Evidence -> Approval -> Production
+# Requires the application's deployer workflow (.cloudbees/workflows/deployer.yaml),
+# which Unify can generate for you from Applications > Workflows.
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: release-staged
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        type: string
+        required: true
+        description: Release manifest (JSON) with the artifact versions to deploy
+  workflow_call:
+    inputs:
+      manifest:
+        type: string
+        required: true
+        description: Release manifest (JSON) with the artifact versions to deploy
+
+metadata:
+  stages/v1alpha1:
+    - name: Evidence
+      jobs:
+        - evidence-my-component
+    - name: Approval
+      jobs:
+        - release-approval
+    - name: Production
+      jobs:
+        - deploy-production
+
+jobs:
+  # One evidence job per component in the application. Replace my-component with the
+  # component name used in the manifest.
+  evidence-my-component:
+    if: ${{ fromJSON(inputs.manifest)['my-component']['my-component'].deploy }}
+    uses: ./.cloudbees/workflows/collect-evidence.yaml
+    with:
+      artifact-id: ${{ fromJSON(inputs.manifest)['my-component']['my-component'].id }}
+
+  release-approval:
+    needs: evidence-my-component
+    delegates: cloudbees-io/manual-approval/custom-job.yml@v1
+    timeout-minutes: 1440
+    with:
+      # Replace with the release managers (user IDs or e-mail addresses).
+      approvers: "release.manager@example.com"
+      disallowLaunchByUser: true
+      instructions: |
+        Review the evidence published by the Evidence stage (Run > Jobs > Evidence):
+        the artifact details and labels.
+        Approve to deploy this release to production, or reject to stop it.
+
+  deploy-production:
+    needs: release-approval
+    environment: production
+    uses: ./.cloudbees/workflows/deployer.yaml
+    with:
+      manifest: ${{ inputs.manifest }}
+      environment: ${{ job.environment }}
