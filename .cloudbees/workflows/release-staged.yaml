@@ -78,18 +78,38 @@ jobs:
             exit 1
           fi
 
-          {
-            echo "## Artifacts to deploy: $COUNT"
-            echo
-          } > /tmp/evidence.md
+          echo "## Artifacts to deploy: $COUNT" > /tmp/evidence.md
+          echo >> /tmp/evidence.md
+          echo "## Raw artifact info (Platform API /v3/artifactinfos)" > /tmp/raw.md
+          echo >> /tmp/raw.md
+          echo "## Test results of the publishing runs (Platform API v4)" > /tmp/tests.md
+          echo >> /tmp/tests.md
+          echo "## Security results of the publishing runs (Platform API v4)" > /tmp/security.md
+          echo >> /tmp/security.md
 
-          {
-            echo "## Raw artifact info (Platform API /v3/artifactinfos)"
-            echo
-          } > /tmp/raw.md
+          # api_section <file> <heading> <path>: GET the path and append the response as a JSON block.
+          # A failed call is written to the evidence as an error, it does not stop the workflow.
+          api_section() {
+            out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$3" \
+              -H "Authorization: Bearer $JWT" \
+              -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
+            HTTP=$(printf '%s' "$out" | tail -n1)
+            BODY=$(printf '%s' "$out" | sed '$d')
+            {
+              echo "### $2"
+              echo
+              case "$HTTP" in
+                2??) ;;
+                *) echo "**ERROR: HTTP $HTTP** from \`$3\`"; echo ;;
+              esac
+              echo '```json'
+              printf '%s' "$BODY" | jq . 2>/dev/null || printf '%s\n' "$BODY"
+              echo '```'
+              echo
+            } >> "$1"
+          }
 
           while IFS="$(printf '\t')" read -r COMP NAME VERSION LOC DIGEST AID CID; do
-            # Labels come from the artifact info (Platform API)
             printf '%s' "$AID" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' \
               || { echo "Invalid or missing artifact id for $COMP/$NAME: '$AID'" >&2; exit 1; }
             INFO=$(curl --silent --show-error --fail-with-body \
@@ -99,18 +119,24 @@ jobs:
                 echo "Platform API call failed for artifact $AID: '$INFO'" >&2
                 exit 1
               }
-            {
-              echo "### $COMP / $NAME $VERSION (artifact $AID)"
-              echo
-              echo '```json'
-              printf '%s' "$INFO" | jq . 2>/dev/null || printf '%s\n' "$INFO"
-              echo '```'
-              echo
-            } >> /tmp/raw.md
+            TITLE="$COMP / $NAME $VERSION (artifact $AID)"
+
+            # Labels come from the artifact info (Platform API)
             LABELS=$(printf '%s' "$INFO" | jq -r '
               (.labels // [])
               | (if type=="array" then map(if type=="object" then (.name // tostring) else tostring end) else [tostring] end)
               | if length==0 then "none" else join(", ") end')
+
+            # Labels starting with TSM- are Jira issue keys
+            JIRA=$(printf '%s' "$INFO" | jq -r '
+              [(.labels // [])[] | strings | select(startswith("TSM-"))]
+              | map("[\(.)](https://cloudbees.atlassian.net/browse/\(.))")
+              | if length==0 then "none" else join(", ") end')
+
+            # The run that published the artifact
+            PUB_COMPONENT=$(printf '%s' "$INFO" | jq -r '.publishedBy.componentId // empty')
+            PUB_RUN=$(printf '%s' "$INFO" | jq -r '.publishedBy.runId // empty')
+
             {
               echo "### $COMP"
               echo
@@ -120,13 +146,35 @@ jobs:
               echo "- Digest: $DIGEST"
               echo "- Artifact ID: $AID"
               echo "- Component ID: $CID"
+              echo "- Published by run: ${PUB_RUN:-n/a} (component ${PUB_COMPONENT:-n/a})"
               echo "- Labels: $LABELS"
+              echo "- Jira issues: $JIRA"
               echo
             } >> /tmp/evidence.md
+
+            {
+              echo "### $TITLE"
+              echo
+              echo '```json'
+              printf '%s' "$INFO" | jq . 2>/dev/null || printf '%s\n' "$INFO"
+              echo '```'
+              echo
+            } >> /tmp/raw.md
+
+            if [ -n "$PUB_COMPONENT" ] && [ -n "$PUB_RUN" ]; then
+              api_section /tmp/tests.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/test-results"
+              api_section /tmp/security.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/security-results"
+            else
+              for f in /tmp/tests.md /tmp/security.md; do
+                { echo "### $TITLE"; echo; echo "**Not available**: the artifact info has no publishedBy.componentId / publishedBy.runId."; echo; } >> "$f"
+              done
+            fi
           done < /tmp/artifacts.tsv
 
           cp /tmp/evidence.md "$CLOUDBEES_OUTPUTS/evidence"
           cp /tmp/raw.md "$CLOUDBEES_OUTPUTS/raw"
+          cp /tmp/tests.md "$CLOUDBEES_OUTPUTS/tests"
+          cp /tmp/security.md "$CLOUDBEES_OUTPUTS/security"
 
       - name: Publish evidence - artifacts and labels
         uses: cloudbees-io/publish-evidence-item@v1
@@ -138,6 +186,16 @@ jobs:
         with:
           content: ${{ steps.collect.outputs.raw }}
 
+      - name: Publish evidence - test results
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.tests }}
+
+      - name: Publish evidence - security results
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.security }}
+
   release-approval:
     needs: evidence
     delegates: cloudbees-io/manual-approval/custom-job.yml@v1
@@ -147,7 +205,7 @@ jobs:
       disallowLaunchByUser: true
       instructions: |
         Review the evidence published by the Evidence stage (Run > Jobs > Evidence):
-        the artifact details and labels.
+        the artifact details, labels and Jira issues, test results and security results.
         Approve to deploy this release to production, or reject to stop it.
 
   deploy-production:
