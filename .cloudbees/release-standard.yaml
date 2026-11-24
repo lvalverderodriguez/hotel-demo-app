@@ -1,0 +1,51 @@
+# Application workflow: .cloudbees/workflows/release-standard.yaml
+# Standard (non-release) flow for a single artifact:
+#   collect evidence -> release manager approval -> deploy to production
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: release-standard
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-id:
+        type: string
+        required: true
+        description: ID of the artifact version to deploy
+      publish-component-id:
+        type: string
+        required: true
+        description: ID of the component whose run published the artifact
+      publish-run-id:
+        type: string
+        required: true
+        description: ID of the run that published the artifact
+
+jobs:
+  collect-evidence:
+    uses: ./.cloudbees/workflows/collect-evidence.yaml
+    with:
+      artifact-id: ${{ inputs.artifact-id }}
+      publish-component-id: ${{ inputs.publish-component-id }}
+      publish-run-id: ${{ inputs.publish-run-id }}
+
+  release-approval:
+    needs: collect-evidence
+    delegates: cloudbees-io/manual-approval/custom-job.yml@v1
+    timeout-minutes: 1440
+    with:
+      # Replace with the release managers (user IDs or e-mail addresses).
+      approvers: "release.manager@example.com"
+      disallowLaunchByUser: true
+      instructions: |
+        Review the evidence published by the collect-evidence job (Run > Jobs > Evidence):
+        artifact labels, test results and security scans of the publishing run.
+        Approve to deploy this artifact to production, or reject to stop the release.
+
+  deploy-production:
+    needs: release-approval
+    environment: production
+    uses: my-org/my-component/.cloudbees/workflows/deploy.yaml
+    with:
+      artifact-id: ${{ inputs.artifact-id }}
+      environment: ${{ job.environment }}
