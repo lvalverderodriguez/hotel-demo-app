@@ -13,7 +13,7 @@ on:
       manifest:
         type: string
         required: true
-        description: Release manifest (JSON) with the artifact versions to deploy
+        description: This is a system-generated parameter and is required for use in application releases. Refer to https://docs.cloudbees.com/docs/cloudbees-platform/latest/applications/releases#manifest for the expected format
       publish-component-id:
         type: string
         required: false
