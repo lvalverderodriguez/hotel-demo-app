@@ -18,7 +18,8 @@ on:
         description: Release manifest (JSON) with the artifact versions to deploy
       approver:
         type: string
-        required: true
+        required: false
+        default: lvalverderodriguez@cloudbees.com
         description: Release manager who approves the deployment (user ID or e-mail address)
   workflow_call:
     inputs:
@@ -28,7 +29,8 @@ on:
         description: Release manifest (JSON) with the artifact versions to deploy
       approver:
         type: string
-        required: true
+        required: false
+        default: lvalverderodriguez@cloudbees.com
         description: Release manager who approves the deployment (user ID or e-mail address)
 
 metadata:
@@ -131,37 +133,67 @@ jobs:
             esac
           }
 
-          # junit_summary <file>: markdown summary table built from the <testsuite> elements of a
-          # JUnit XML file (name, tests, failures, errors, skipped, time). Fails if there are none.
+          # junit_summary <file>: markdown summary table of a test result file. Understands the
+          # Jenkins JUnit plugin format (<result><suites><suite><cases><case>, which is what CloudBees CI
+          # publishes) and standard JUnit XML (<testsuite tests= failures= errors= skipped= time=>).
+          # Fails if no suite is found.
           junit_summary() {
-            tr '\n\r' '  ' < "$1" | grep -o '<testsuite [^>]*>' | awk '
+            awk '
               function attr(tag, n,   re) {
                 re = " " n "=\"[^\"]*\""
                 if (match(tag, re)) return substr(tag, RSTART + length(n) + 3, RLENGTH - length(n) - 4)
                 return ""
               }
+              function text(l, tag) {
+                sub("^<" tag ">", "", l); sub("</" tag ">.*$", "", l)
+                gsub(/&lt;/, "<", l); gsub(/&gt;/, ">", l); gsub(/&quot;/, "\"", l); gsub(/&amp;/, "\\&", l)
+                gsub(/\|/, "\\|", l)
+                return l
+              }
               function fmt(x) {
-                x = int(x + 0.5)
+                x = int(x)
                 if (x >= 3600) return int(x / 3600) "h " int((x % 3600) / 60) "m " (x % 60) "s"
                 if (x >= 60) return int(x / 60) "m " (x % 60) "s"
                 return x "s"
+              }
+              function emit(name, t, fail, sk, tm,   pass) {
+                pass = t - fail - sk; if (pass < 0) pass = 0
+                printf "| %s | %d | %d | %d | %d | %s |\n", name, t, pass, fail, sk, fmt(tm)
+                T += t; P += pass; F += fail; S += sk; TM += tm; n++
+              }
+              function line(l) {
+                sub(/^[ \t]+/, "", l); sub(/[ \t]+$/, "", l)
+                # Jenkins JUnit plugin format
+                if (l == "<suite>") { inS = 1; incases = 0; sname = ""; stime = ""; sdur = ""; tot = 0; fail = 0; skip = 0; return }
+                if (inS && l == "<cases>") { incases = 1; return }
+                if (inS && !incases) {
+                  if (l ~ /^<name>/) sname = text(l, "name")
+                  else if (l ~ /^<time>/) stime = text(l, "time")
+                  else if (l ~ /^<duration>/) sdur = text(l, "duration")
+                  return
+                }
+                if (inS && incases) {
+                  if (l == "<case>") tot++
+                  else if (l ~ /^<isProperFailure>true</) fail++
+                  else if (l ~ /^<skipped>true</) skip++
+                  else if (l == "</suite>") { emit(sname, tot, fail, skip, (stime != "" ? stime : sdur) + 0); inS = 0 }
+                  return
+                }
+                # standard JUnit XML
+                if (l ~ /^<testsuite /) {
+                  nm = attr(l, "name"); gsub(/\|/, "\\|", nm)
+                  emit(nm, attr(l, "tests") + 0, attr(l, "failures") + attr(l, "errors"), attr(l, "skipped") + 0, attr(l, "time") + 0)
+                }
               }
               BEGIN {
                 print "| Test suite name | Total test cases | Total cases passed | Total cases failed | Total cases skipped | Run time |"
                 print "|---|---|---|---|---|---|"
               }
-              {
-                name = attr($0, "name"); gsub(/\|/, "\\|", name)
-                t = attr($0, "tests") + 0; f = attr($0, "failures") + 0; e = attr($0, "errors") + 0
-                sk = attr($0, "skipped") + 0; tm = attr($0, "time") + 0
-                fail = f + e; pass = t - fail - sk; if (pass < 0) pass = 0
-                printf "| %s | %d | %d | %d | %d | %s |\n", name, t, pass, fail, sk, fmt(tm)
-                T += t; P += pass; F += fail; S += sk; TM += tm; n++
-              }
+              { gsub(/\r/, ""); gsub(/></, ">\n<"); k = split($0, parts, "\n"); for (i = 1; i <= k; i++) line(parts[i]) }
               END {
                 if (n == 0) exit 3
                 if (n > 1) printf "| **Total** | **%d** | **%d** | **%d** | **%d** | **%s** |\n", T, P, F, S, fmt(TM)
-              }'
+              }' "$1"
           }
 
           # tests_section <file> <heading> <path>: link to the run's Test Results in Unify, then for
@@ -191,7 +223,7 @@ jobs:
                  && junit_summary /tmp/tr.out > /tmp/tr.md 2>/dev/null; then
                 cat /tmp/tr.md
               else
-                echo "_Summary not available: the file could not be downloaded or is not JUnit XML._"
+                echo "_Summary not available: the file could not be downloaded or is not in a recognised test result format._"
               fi
               echo
             done >> "$1"
