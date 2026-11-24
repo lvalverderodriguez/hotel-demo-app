@@ -1,0 +1,58 @@
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: artifact-raw-data
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact-id:
+        type: string
+        required: true
+        description: ID of the artifact version
+
+jobs:
+  details:
+    permissions:
+      id-token: read
+    steps:
+      - id: artifact
+        name: Get artifact details (Platform API)
+        # Same image the get-artifact-details action uses (it ships curl and jq)
+        uses: docker://public.ecr.aws/l7o7z1g8/actions/cb-utils:main-0.1.59
+        shell: sh
+        env:
+          JWT: ${{ cloudbees.api.token }}
+          URL: ${{ cloudbees.api.url }}
+          INPUT_ARTIFACT_ID: ${{ inputs.artifact-id }}
+        run: |
+          set -eu
+          printf '%s' "$INPUT_ARTIFACT_ID" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' \
+            || { echo "Invalid artifact-id: a UUID is expected" >&2; exit 1; }
+
+          response=$(curl --silent --show-error --fail-with-body \
+            -X GET "$URL/v3/artifactinfos/$INPUT_ARTIFACT_ID" \
+            -H "Authorization: Bearer $JWT" \
+            -H 'Content-Type: application/json') || {
+              echo "Platform API call failed with error: '$response'" >&2
+              exit 1
+            }
+
+          echo "$response" | jq .
+
+          # Same fields the action exposes, plus the full response
+          printf %s "$(echo "$response" | jq -r '.name // empty')"    > "$CLOUDBEES_OUTPUTS/name"
+          printf %s "$(echo "$response" | jq -r '.version // empty')" > "$CLOUDBEES_OUTPUTS/version"
+          printf %s "$(echo "$response" | jq -r '.url // empty')"     > "$CLOUDBEES_OUTPUTS/url"
+          printf %s "$(echo "$response" | jq -r '.digest // empty')"  > "$CLOUDBEES_OUTPUTS/digest"
+          printf %s "$(echo "$response" | jq -c .)"                   > "$CLOUDBEES_OUTPUTS/raw_artifact_data"
+
+      - name: Use the outputs
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          NAME: ${{ steps.artifact.outputs.name }}
+          VERSION: ${{ steps.artifact.outputs.version }}
+          RAW: ${{ steps.artifact.outputs.raw_artifact_data }}
+        run: |
+          echo "Artifact: $NAME $VERSION"
+          echo "Raw: $RAW"
