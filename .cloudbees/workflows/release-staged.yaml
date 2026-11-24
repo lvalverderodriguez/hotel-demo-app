@@ -21,6 +21,21 @@ on:
         required: false
         default: lvalverderodriguez@cloudbees.com
         description: Release manager who approves the deployment (user ID or e-mail address)
+      api-url:
+        type: string
+        required: false
+        default: https://api.cloudbees.io
+        description: CloudBees Unify API server used for the PAT-authenticated calls (for example https://api.hbx.cloudbees.io)
+      ui-url:
+        type: string
+        required: false
+        default: https://cloudbees.io/cloudbees-support
+        description: CloudBees Unify UI host and tenant used for the links in the evidence (for example https://ui.hbx.cloudbees.io/hbx)
+      environment:
+        type: string
+        required: false
+        default: pro-lola
+        description: Unify environment to deploy to. The PAT secret is read from this environment.
   workflow_call:
     inputs:
       manifest:
@@ -32,6 +47,21 @@ on:
         required: false
         default: lvalverderodriguez@cloudbees.com
         description: Release manager who approves the deployment (user ID or e-mail address)
+      api-url:
+        type: string
+        required: false
+        default: https://api.cloudbees.io
+        description: CloudBees Unify API server used for the PAT-authenticated calls (for example https://api.hbx.cloudbees.io)
+      ui-url:
+        type: string
+        required: false
+        default: https://cloudbees.io/cloudbees-support
+        description: CloudBees Unify UI host and tenant used for the links in the evidence (for example https://ui.hbx.cloudbees.io/hbx)
+      environment:
+        type: string
+        required: false
+        default: pro-lola
+        description: Unify environment to deploy to. The PAT secret is read from this environment.
 
 metadata:
   stages/v1alpha1:
@@ -47,8 +77,8 @@ metadata:
 
 jobs:
   evidence:
-    # The PAT secret lives in this environment, so the job must run in it to read it
-    environment: pro-lola
+    # The PAT secret lives in the target environment, so the job must run in it to read it
+    environment: ${{ inputs.environment }}
     steps:
       - id: collect
         name: Build the evidence from the release manifest
@@ -59,10 +89,12 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
           JWT: ${{ cloudbees.api.token }}
           URL: ${{ cloudbees.api.url }}
+          # API server for the PAT-authenticated calls (components, test results, branch findings)
+          API_URL: ${{ inputs.api-url }}
           # Personal access token for the v4 API (secret of the pro-lola environment)
           PAT: ${{ secrets.PAT }}
-          # Base URL of the Unify UI, including the top-level organization slug
-          UNIFY_UI_URL: https://cloudbees.io/cloudbees-support
+          # Unify UI host and tenant, used for the links in the evidence
+          UNIFY_UI_URL: ${{ inputs.ui-url }}
         run: |
           set -eu
           printf '%s' "$MANIFEST" > /tmp/manifest.json
@@ -104,7 +136,7 @@ jobs:
               BODY='{"error":"the PAT secret is empty or not available to this job"}'
               return 0
             fi
-            out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$1" \
+            out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "${API_URL%/}$1" \
               -H "Authorization: Bearer $PAT" \
               -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
             HTTP=$(printf '%s' "$out" | tail -n1)
@@ -247,6 +279,9 @@ jobs:
             {
               echo "### $2"
               echo
+              if [ -n "$3" ] && [ -n "$4" ]; then
+                echo "- Security Center: [open the component's Security Center](${UNIFY_UI_URL%/}/$3/components/$4/security-center)"
+              fi
             } >> "$1"
             REF="$5"
             BRANCH="${REF#refs/heads/}"
@@ -321,7 +356,7 @@ jobs:
             # Link to the run's Test Results in Unify
             TEST_URL=""
             if [ -n "$PUB_COMPONENT" ] && [ -n "$PUB_RUN" ] && [ -n "$PUB_AUTOMATION" ] && [ -n "$PUB_ORG" ]; then
-              TEST_URL="$UNIFY_UI_URL/$PUB_ORG/components/$PUB_COMPONENT/runs/$PUB_AUTOMATION/$PUB_RUN/${PUB_ATTEMPT:-1}/logs?componentId=$PUB_COMPONENT&workflowId=$PUB_AUTOMATION&organizationId=$PUB_ORG&job=Run+tests&activeTab=Test+Results"
+              TEST_URL="${UNIFY_UI_URL%/}/$PUB_ORG/components/$PUB_COMPONENT/runs/$PUB_AUTOMATION/$PUB_RUN/${PUB_ATTEMPT:-1}/logs?componentId=$PUB_COMPONENT&workflowId=$PUB_AUTOMATION&organizationId=$PUB_ORG&job=Run+tests&activeTab=Test+Results"
             fi
 
             {
@@ -368,11 +403,6 @@ jobs:
         with:
           content: ${{ steps.collect.outputs.evidence }}
 
-      - name: Publish evidence - raw artifact info
-        uses: cloudbees-io/publish-evidence-item@v1
-        with:
-          content: ${{ steps.collect.outputs.raw }}
-
       - name: Publish evidence - test results
         uses: cloudbees-io/publish-evidence-item@v1
         with:
@@ -382,6 +412,11 @@ jobs:
         uses: cloudbees-io/publish-evidence-item@v1
         with:
           content: ${{ steps.collect.outputs.security }}
+
+      - name: Publish evidence - raw artifact info
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.raw }}
 
   release-approval:
     needs: evidence
@@ -397,7 +432,7 @@ jobs:
 
   deploy-production:
     needs: release-approval
-    environment: pro-lola
+    environment: ${{ inputs.environment }}
     uses: ./.cloudbees/workflows/deployer.yaml
     with:
       manifest: ${{ inputs.manifest }}
