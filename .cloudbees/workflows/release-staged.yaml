@@ -92,7 +92,7 @@ jobs:
           echo >> /tmp/raw.md
           echo "## Test results of the publishing runs" > /tmp/tests.md
           echo >> /tmp/tests.md
-          echo "## Security issues of the component branch" > /tmp/security.md
+          echo "## Security findings of the component branch" > /tmp/security.md
           echo >> /tmp/security.md
 
           # api_fetch <path>: GET a v4 path authenticated with the PAT (the v3 artifact info keeps
@@ -229,20 +229,20 @@ jobs:
             done >> "$1"
           }
 
-          # security_section <file> <heading> <orgId> <componentId> <git ref>: summary of the security
-          # issues of the branch the artifact was built from. It first reads the component to get the
-          # SCM integration (integrationId) backing it, then the branch issues from the asset store.
-          # The numbers are the branch's issues, not only those of the publishing run.
+          # security_section <file> <heading> <orgId> <componentId> <git ref>: security findings summary
+          # of the branch the artifact was built from. It first reads the component to get the SCM
+          # integration (integrationId) backing it, then the branch findings summary from the asset store.
+          # The numbers are those of the branch, not only of the run that published the artifact.
           SEC_FILTER='
-            def facet($label; $k): (.[$k] // []) | if length == 0 then empty
-              else "- \($label): " + (map("\(.name // .id): \(.count // 0)") | join(", ")) end;
-            ((.severities // []) | map(.count // 0) | add // 0) as $total
-            | if $total == 0 and ((.severities // []) | length) == 0 then "No security issues on this branch."
-              else "- Total issues: \($total)",
-                   facet("Severities"; "severities"), facet("Tools"; "tools"), facet("Categories"; "categories"),
-                   facet("Remediation status"; "remediationStatus"), facet("Triage status"; "triageStatus"),
-                   facet("SLA"; "sla"), facet("Asset types"; "assetTypes")
-              end'
+            def sev($c): ["VERY_HIGH", "HIGH", "MEDIUM", "LOW"] | map(select($c[.] != null) | "\(.): \($c[.])") | join(", ");
+            .counts as $c
+            | "- Total findings: \($c.total // 0)",
+              "- By severity: \(sev($c))",
+              (if .lastScanned then "- Last scanned: \(.lastScanned)" else empty end),
+              (if ((.tools // []) | length) > 0
+               then "", "| Tool | Total | Very high | High | Medium | Low |", "|---|---|---|---|---|---|",
+                    (.tools[] | "| \(.name // .id) | \(.counts.total // 0) | \(.counts.VERY_HIGH // 0) | \(.counts.HIGH // 0) | \(.counts.MEDIUM // 0) | \(.counts.LOW // 0) |")
+               else empty end)'
           security_section() {
             {
               echo "### $2"
@@ -267,7 +267,7 @@ jobs:
               return 0
             fi
             BRANCH_ENC=$(printf '%s' "$BRANCH" | jq -sRr @uri)
-            SEC_PATH="/v1/resources/$3/endpoints/$ENDPOINT_ID/asset-store/components/$4/branches/$BRANCH_ENC/issues"
+            SEC_PATH="/v1/resources/$3/endpoints/$ENDPOINT_ID/asset-store/components/$4/branches/$BRANCH_ENC/attributes/findings-summary"
             api_fetch "$SEC_PATH"
             case "$HTTP" in
               2??) ;;
@@ -275,12 +275,14 @@ jobs:
             esac
             {
               echo "- Branch: \`$BRANCH\`"
-              printf '%s' "$BODY" | jq -r "$SEC_FILTER" 2>/dev/null || {
-                echo "Could not parse the response:"
+              if printf '%s' "$BODY" | jq -e '.counts | type == "object"' >/dev/null 2>&1; then
+                printf '%s' "$BODY" | jq -r "$SEC_FILTER"
+              else
+                echo "Unexpected response format, shown as received:"
                 echo '```json'
-                printf '%s\n' "$BODY"
+                printf '%s' "$BODY" | jq . 2>/dev/null || printf '%s\n' "$BODY"
                 echo '```'
-              }
+              fi
               echo
             } >> "$1"
           }
