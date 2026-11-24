@@ -45,6 +45,8 @@ metadata:
 
 jobs:
   evidence:
+    # The PAT secret lives in this environment, so the job must run in it to read it
+    environment: pro-lola
     steps:
       - id: collect
         name: Build the evidence from the release manifest
@@ -55,6 +57,8 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
           JWT: ${{ cloudbees.api.token }}
           URL: ${{ cloudbees.api.url }}
+          # Personal access token for the v4 API (secret of the pro-lola environment)
+          PAT: ${{ secrets.PAT }}
         run: |
           set -eu
           printf '%s' "$MANIFEST" > /tmp/manifest.json
@@ -87,12 +91,17 @@ jobs:
           echo "## Security results of the publishing runs (Platform API v4)" > /tmp/security.md
           echo >> /tmp/security.md
 
-          # api_section <file> <heading> <path>: GET the path and append the response as a JSON block.
-          # A failed call is written to the evidence as an error, it does not stop the workflow.
+          # api_section <file> <heading> <path>: GET a v4 path authenticated with the PAT and append
+          # the response as a JSON block. A failed call is written to the evidence as an error,
+          # it does not stop the workflow. (The v3 artifact info above keeps using the workflow token.)
           api_section() {
-            out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$3" \
-              -H "Authorization: Bearer $JWT" \
-              -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
+            if [ -z "${PAT:-}" ]; then
+              out=$(printf '{"error":"the PAT secret is empty or not available to this job"}\n000')
+            else
+              out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$3" \
+                -H "Authorization: Bearer $PAT" \
+                -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
+            fi
             HTTP=$(printf '%s' "$out" | tail -n1)
             BODY=$(printf '%s' "$out" | sed '$d')
             {
