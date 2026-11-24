@@ -126,7 +126,7 @@ jobs:
 
   deploy-production:
     needs: release-approval
-    environment: lola-prod
+    environment: pro-lola
     uses: ./.cloudbees/workflows/deployer.yaml
     with:
       manifest: ${{ inputs.manifest }}
