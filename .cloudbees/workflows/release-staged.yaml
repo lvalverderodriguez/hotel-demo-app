@@ -16,12 +16,20 @@ on:
         type: string
         required: true
         description: Release manifest (JSON) with the artifact versions to deploy
+      approver:
+        type: string
+        required: true
+        description: Release manager who approves the deployment (user ID or e-mail address)
   workflow_call:
     inputs:
       manifest:
         type: string
         required: true
         description: Release manifest (JSON) with the artifact versions to deploy
+      approver:
+        type: string
+        required: true
+        description: Release manager who approves the deployment (user ID or e-mail address)
 
 metadata:
   stages/v1alpha1:
@@ -75,6 +83,11 @@ jobs:
             echo
           } > /tmp/evidence.md
 
+          {
+            echo "## Raw artifact info (Platform API /v3/artifactinfos)"
+            echo
+          } > /tmp/raw.md
+
           while IFS="$(printf '\t')" read -r COMP NAME VERSION LOC DIGEST AID CID; do
             # Labels come from the artifact info (Platform API)
             printf '%s' "$AID" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' \
@@ -86,6 +99,14 @@ jobs:
                 echo "Platform API call failed for artifact $AID: '$INFO'" >&2
                 exit 1
               }
+            {
+              echo "### $COMP / $NAME $VERSION (artifact $AID)"
+              echo
+              echo '```json'
+              printf '%s' "$INFO" | jq . 2>/dev/null || printf '%s\n' "$INFO"
+              echo '```'
+              echo
+            } >> /tmp/raw.md
             LABELS=$(printf '%s' "$INFO" | jq -r '
               (.labels // [])
               | (if type=="array" then map(if type=="object" then (.name // tostring) else tostring end) else [tostring] end)
@@ -105,19 +126,24 @@ jobs:
           done < /tmp/artifacts.tsv
 
           cp /tmp/evidence.md "$CLOUDBEES_OUTPUTS/evidence"
+          cp /tmp/raw.md "$CLOUDBEES_OUTPUTS/raw"
 
       - name: Publish evidence - artifacts and labels
         uses: cloudbees-io/publish-evidence-item@v1
         with:
           content: ${{ steps.collect.outputs.evidence }}
 
+      - name: Publish evidence - raw artifact info
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.raw }}
+
   release-approval:
     needs: evidence
     delegates: cloudbees-io/manual-approval/custom-job.yml@v1
     timeout-minutes: 1440
     with:
-      # Replace with the release managers (user IDs or e-mail addresses).
-      approvers: "release.manager@example.com"
+      approvers: ${{ inputs.approver }}
       disallowLaunchByUser: true
       instructions: |
         Review the evidence published by the Evidence stage (Run > Jobs > Evidence):
