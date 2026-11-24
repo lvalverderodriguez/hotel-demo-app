@@ -1,6 +1,8 @@
 # Application workflow: .cloudbees/workflows/release-staged.yaml
 # Staged release workflow (run from an application release; receives the release manifest):
 #   Evidence -> Approval -> Production
+# Component agnostic: every component and artifact flagged deploy=true in the manifest
+# is listed in the evidence, and the deployer workflow deploys whatever the manifest holds.
 # Requires the application's deployer workflow (.cloudbees/workflows/deployer.yaml),
 # which Unify can generate for you from Applications > Workflows.
 apiVersion: automation.cloudbees.io/v1alpha1
@@ -25,7 +27,7 @@ metadata:
   stages/v1alpha1:
     - name: Evidence
       jobs:
-        - evidence-my-component
+        - evidence
     - name: Approval
       jobs:
         - release-approval
@@ -34,21 +36,63 @@ metadata:
         - deploy-production
 
 jobs:
-  # One evidence job per component in the application. Replace my-component with the
-  # component name used in the manifest.
-  evidence-my-component:
-    if: ${{ fromJSON(inputs.manifest)['my-component']['my-component'].deploy }}
-    uses: ./.cloudbees/workflows/collect-evidence.yaml
-    with:
-      artifact-id: ${{ fromJSON(inputs.manifest)['my-component']['my-component'].id }}
+  evidence:
+    steps:
+      - id: collect
+        name: Build the evidence from the release manifest
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -eu
+          apk add --no-cache jq >/dev/null
+          printf '%s' "$MANIFEST" > /tmp/manifest.json
+          jq -e . /tmp/manifest.json >/dev/null || { echo "The manifest is not valid JSON" >&2; exit 1; }
+
+          # Manifest shape: { "<component>": { "deploy": bool, "id": "<component id>",
+          #                                    "<artifact>": { "deploy": bool, "id", "name", "version", "url", "digest" } } }
+          SELECT='to_entries[]
+            | select(.value | type == "object" and .deploy == true)
+            | .key as $comp | .value as $c
+            | $c | to_entries[]
+            | select(.value | type == "object")
+            | select(.value.deploy != false)
+            | .key as $k | .value as $a'
+
+          COUNT=$(jq "[ $SELECT | 1 ] | length" /tmp/manifest.json)
+          if [ "$COUNT" -eq 0 ]; then
+            echo "The manifest has no artifact flagged deploy=true" >&2
+            exit 1
+          fi
+
+          {
+            echo "## Artifacts to deploy: $COUNT"
+            echo
+            jq -r "$SELECT
+              | \"### \(\$comp)\", \"\",
+                \"- Artifact: \(\$a.name // \$k)\",
+                \"- Version: \(\$a.version // \"n/a\")\",
+                \"- Location: \(\$a.url // \"n/a\")\",
+                \"- Digest: \(\$a.digest // \"n/a\")\",
+                \"- Artifact ID: \(\$a.id // \"n/a\")\",
+                \"- Component ID: \(\$c.id // \"n/a\")\",
+                \"- Labels: not retrieved (publishing run not available in the release manifest)\",
+                \"\"" /tmp/manifest.json
+          } > "$CLOUDBEES_OUTPUTS/evidence"
+
+      - name: Publish evidence - artifacts and labels
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.evidence }}
 
   release-approval:
-    needs: evidence-my-component
+    needs: evidence
     delegates: cloudbees-io/manual-approval/custom-job.yml@v1
     timeout-minutes: 1440
     with:
       # Replace with the release managers (user IDs or e-mail addresses).
-      approvers: "release.manager@example.com"
+      approvers: "lvalverderodriguez@cloudbees.com"
       disallowLaunchByUser: true
       instructions: |
         Review the evidence published by the Evidence stage (Run > Jobs > Evidence):
