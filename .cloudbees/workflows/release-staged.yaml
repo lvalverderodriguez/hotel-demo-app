@@ -91,29 +91,117 @@ jobs:
           echo "## Security results of the publishing runs (Platform API v4)" > /tmp/security.md
           echo >> /tmp/security.md
 
-          # api_section <file> <heading> <path>: GET a v4 path authenticated with the PAT and append
-          # the response as a JSON block. A failed call is written to the evidence as an error,
-          # it does not stop the workflow. (The v3 artifact info above keeps using the workflow token.)
-          api_section() {
+          # api_fetch <path>: GET a v4 path authenticated with the PAT (the v3 artifact info keeps
+          # using the workflow token). Sets HTTP and BODY. A failure never stops the workflow:
+          # it is written to the evidence as an error.
+          api_fetch() {
             if [ -z "${PAT:-}" ]; then
-              out=$(printf '{"error":"the PAT secret is empty or not available to this job"}\n000')
-            else
-              out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$3" \
-                -H "Authorization: Bearer $PAT" \
-                -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
+              HTTP=000
+              BODY='{"error":"the PAT secret is empty or not available to this job"}'
+              return 0
             fi
+            out=$(curl --silent --show-error -w '\n%{http_code}' -X GET "$URL$1" \
+              -H "Authorization: Bearer $PAT" \
+              -H 'Content-Type: application/json') || out=$(printf 'curl failed\n000')
             HTTP=$(printf '%s' "$out" | tail -n1)
             BODY=$(printf '%s' "$out" | sed '$d')
+          }
+
+          # api_error <file> <heading> <path>: write the failed call to the evidence
+          api_error() {
             {
               echo "### $2"
               echo
-              case "$HTTP" in
-                2??) ;;
-                *) echo "**ERROR: HTTP $HTTP** from \`$3\`"; echo ;;
-              esac
+              echo "**ERROR: HTTP $HTTP** from \`$3\`"
+              echo
               echo '```json'
               printf '%s' "$BODY" | jq . 2>/dev/null || printf '%s\n' "$BODY"
               echo '```'
+              echo
+            } >> "$1"
+          }
+
+          # api_section <file> <heading> <path>: raw JSON response of a v4 call
+          api_section() {
+            api_fetch "$3"
+            case "$HTTP" in
+              2??) { echo "### $2"; echo; echo '```json'; printf '%s' "$BODY" | jq . 2>/dev/null || printf '%s\n' "$BODY"; echo '```'; echo; } >> "$1" ;;
+              *) api_error "$1" "$2" "$3" ;;
+            esac
+          }
+
+          # tests_section <file> <heading> <path>: the test-results response lists gzip files behind
+          # presigned URLs. Each file is downloaded (no Authorization header, the URL carries the
+          # signature, which is never written to the evidence), decompressed and added to the evidence.
+          tests_section() {
+            api_fetch "$3"
+            case "$HTTP" in
+              2??) ;;
+              *) api_error "$1" "$2" "$3"; return 0 ;;
+            esac
+            FILES=$(printf '%s' "$BODY" | jq -r '(.files // [])[] | [.fileName, .downloadUrl, (.uploadedAt // "n/a")] | @tsv')
+            { echo "### $2"; echo; } >> "$1"
+            if [ -z "$FILES" ]; then
+              { echo "No test result files for this run."; echo; } >> "$1"
+              return 0
+            fi
+            printf '%s\n' "$FILES" | while IFS="$(printf '\t')" read -r FN DU UP; do
+              echo "#### File: $FN"
+              echo
+              echo "- Uploaded: $UP"
+              if curl --silent --show-error --fail -m 120 -o /tmp/tr.gz "$DU" 2>/dev/null && gunzip -c /tmp/tr.gz > /tmp/tr.out 2>/dev/null; then
+                SIZE=$(wc -c < /tmp/tr.out | tr -d ' ')
+                if jq -e . /tmp/tr.out >/dev/null 2>&1; then KIND=json
+                elif head -c 1 /tmp/tr.out | grep -q '<'; then KIND=xml
+                else KIND=text; fi
+                echo "- Format: $KIND, $SIZE bytes"
+                echo
+                echo "\`\`\`$KIND"
+                if [ "$KIND" = json ]; then jq . /tmp/tr.out | head -c 20000; else head -c 20000 /tmp/tr.out; fi
+                echo
+                echo '```'
+                [ "$SIZE" -gt 20000 ] && echo "(truncated to the first 20000 bytes)"
+              else
+                echo "- **ERROR**: could not download or decompress the file (the presigned URL may have expired)"
+              fi
+              echo
+            done >> "$1"
+          }
+
+          # security_section <file> <heading> <path>: summary by severity plus a table of the findings
+          # (first 50, most severe first) built from the security-results response.
+          SEC_FILTER='
+            def esc: tostring | gsub("\\|"; "\\|") | gsub("[\r\n]+"; " ");
+            def srank: ({"critical":0,"high":1,"medium":2,"low":3}[.] // 4);
+            (.findings // []) as $f
+            | ($f | length) as $n
+            | if $n == 0 then "No security findings for this run."
+              else
+                ($f | map(.severity // "unknown" | ascii_downcase)) as $sev
+                | "- Findings: \($n) (active: \([$f[] | select(.isActive == true)] | length))",
+                  "- By severity: \($sev | unique | sort_by(srank) | map(. as $s | "\($s): \($sev | map(select(. == $s)) | length)") | join(", "))",
+                  "",
+                  "| Severity | Finding | Code | Tool | Category | Active | Remediation | Triage | Scan time |",
+                  "|---|---|---|---|---|---|---|---|---|",
+                  ($f | sort_by((.severity // "") | ascii_downcase | srank) | .[:50][]
+                    | "| \(.severity // "n/a" | esc) | \(.findingName // "n/a" | esc) | \(.findingCode // "n/a" | esc) | \(.toolDisplayName // .toolName // "n/a" | esc) | \(.category // "n/a" | esc) | \(.isActive | if . == null then "n/a" else . end | esc) | \(.remediationStatus // "n/a" | esc) | \(.triageStatus // "n/a" | esc) | \(.scanTime // "n/a" | esc) |"),
+                  (if $n > 50 then "", "Showing the 50 most severe of \($n) findings." else empty end)
+              end'
+          security_section() {
+            api_fetch "$3"
+            case "$HTTP" in
+              2??) ;;
+              *) api_error "$1" "$2" "$3"; return 0 ;;
+            esac
+            {
+              echo "### $2"
+              echo
+              printf '%s' "$BODY" | jq -r "$SEC_FILTER" 2>/dev/null || {
+                echo "Could not parse the response:"
+                echo '```json'
+                printf '%s\n' "$BODY"
+                echo '```'
+              }
               echo
             } >> "$1"
           }
@@ -171,8 +259,8 @@ jobs:
             } >> /tmp/raw.md
 
             if [ -n "$PUB_COMPONENT" ] && [ -n "$PUB_RUN" ]; then
-              api_section /tmp/tests.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/test-results"
-              api_section /tmp/security.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/security-results"
+              tests_section /tmp/tests.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/test-results"
+              security_section /tmp/security.md "$TITLE" "/v4/components/$PUB_COMPONENT/runs/$PUB_RUN/security-results"
             else
               for f in /tmp/tests.md /tmp/security.md; do
                 { echo "### $TITLE"; echo; echo "**Not available**: the artifact info has no publishedBy.componentId / publishedBy.runId."; echo; } >> "$f"
