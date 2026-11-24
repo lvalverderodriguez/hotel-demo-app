@@ -88,11 +88,11 @@ jobs:
 
           echo "## Artifacts to deploy: $COUNT" > /tmp/evidence.md
           echo >> /tmp/evidence.md
-          echo "## Raw artifact info (Platform API /v3/artifactinfos)" > /tmp/raw.md
+          echo "## Raw artifact info" > /tmp/raw.md
           echo >> /tmp/raw.md
-          echo "## Test results of the publishing runs (Platform API v4)" > /tmp/tests.md
+          echo "## Test results of the publishing runs" > /tmp/tests.md
           echo >> /tmp/tests.md
-          echo "## Security results of the publishing runs (Platform API v4)" > /tmp/security.md
+          echo "## Security results of the publishing runs" > /tmp/security.md
           echo >> /tmp/security.md
 
           # api_fetch <path>: GET a v4 path authenticated with the PAT (the v3 artifact info keeps
