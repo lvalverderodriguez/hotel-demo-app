@@ -1,0 +1,100 @@
+# Application workflow: .cloudbees/workflows/collect-evidence.yaml
+# Reusable workflow. Publishes the artifact details and its labels as an evidence item
+# on the calling run.
+apiVersion: automation.cloudbees.io/v1alpha1
+kind: workflow
+name: collect-evidence
+
+on:
+  workflow_call:
+    inputs:
+      artifact-id:
+        type: string
+        required: true
+        description: ID of the artifact version being deployed
+      publish-component-id:
+        type: string
+        required: false
+        description: Component whose run published the artifact (needed to read labels)
+      publish-run-id:
+        type: string
+        required: false
+        description: Run that published the artifact (needed to read labels)
+
+jobs:
+  evidence:
+    permissions:
+      id-token: read
+    steps:
+      - id: artifact
+        name: Get artifact details
+        uses: cloudbees-io/get-artifact-details@v1
+        with:
+          artifact-id: ${{ inputs.artifact-id }}
+
+      - id: collect
+        name: Build the artifact and labels evidence
+        uses: docker://alpine:3.20
+        shell: sh
+        env:
+          API_URL: ${{ cloudbees.api.url }}
+          API_TOKEN: ${{ cloudbees.api.token }}
+          ARTIFACT_ID: ${{ inputs.artifact-id }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
+          ARTIFACT_VERSION: ${{ steps.artifact.outputs.version }}
+          ARTIFACT_URL: ${{ steps.artifact.outputs.url }}
+          ARTIFACT_DIGEST: ${{ steps.artifact.outputs.digest }}
+          COMPONENT_ID: ${{ inputs.publish-component-id }}
+          RUN_ID: ${{ inputs.publish-run-id }}
+        run: |
+          set -eu
+
+          is_uuid() { printf '%s' "$1" | grep -Eq '^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$'; }
+          is_uuid "$ARTIFACT_ID" || { echo "Invalid artifact-id: a UUID is expected" >&2; exit 1; }
+
+          LABELS="not retrieved (publish-component-id and publish-run-id were not provided)"
+          PUBLISHED_BY="unknown"
+
+          if [ -n "$COMPONENT_ID" ] || [ -n "$RUN_ID" ]; then
+            if [ -z "$COMPONENT_ID" ] || [ -z "$RUN_ID" ]; then
+              echo "Provide both publish-component-id and publish-run-id, or neither" >&2
+              exit 1
+            fi
+            is_uuid "$COMPONENT_ID" || { echo "Invalid publish-component-id: a UUID is expected" >&2; exit 1; }
+            is_uuid "$RUN_ID" || { echo "Invalid publish-run-id: a UUID is expected" >&2; exit 1; }
+
+            apk add --no-cache curl jq >/dev/null
+            curl -fsS -H "Authorization: Bearer $API_TOKEN" -H "Accept: application/json" \
+              "$API_URL/v4/components/$COMPONENT_ID/runs/$RUN_ID/artifacts" > /tmp/artifacts.json
+
+            ART=$(jq -c --arg id "$ARTIFACT_ID" '
+              (if type=="array" then . else (.artifacts // .items // []) end)
+              | map(select((.id // .artifactId // .artifact_id // "") == $id))
+              | .[0] // empty' /tmp/artifacts.json)
+            if [ -z "$ART" ]; then
+              echo "Artifact $ARTIFACT_ID was not published by run $RUN_ID of component $COMPONENT_ID" >&2
+              exit 1
+            fi
+            LABELS=$(printf '%s' "$ART" | jq -r '
+              (.labels // .label // [])
+              | (if type=="array" then map(if type=="object" then (.name // tostring) else tostring end) else [tostring] end)
+              | if length==0 then "none" else join(", ") end')
+            PUBLISHED_BY="run $RUN_ID (component $COMPONENT_ID)"
+          fi
+
+          {
+            echo "## Artifact and labels"
+            echo
+            echo "- Name: $ARTIFACT_NAME"
+            echo "- Version: $ARTIFACT_VERSION"
+            echo "- Location: $ARTIFACT_URL"
+            echo "- Digest: $ARTIFACT_DIGEST"
+            echo "- Artifact ID: $ARTIFACT_ID"
+            echo "- Published by: $PUBLISHED_BY"
+            echo "- Labels: $LABELS"
+          } > "$CLOUDBEES_OUTPUTS/labels"
+
+      - name: Publish evidence - artifact and labels
+        uses: cloudbees-io/publish-evidence-item@v1
+        with:
+          content: ${{ steps.collect.outputs.labels }}
