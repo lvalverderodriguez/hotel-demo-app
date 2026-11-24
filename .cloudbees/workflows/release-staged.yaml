@@ -14,14 +14,6 @@ on:
         type: string
         required: true
         description: This is a system-generated parameter and is required for use in application releases. Refer to https://docs.cloudbees.com/docs/cloudbees-platform/latest/applications/releases#manifest for the expected format
-      publish-component-id:
-        type: string
-        required: false
-        description: Component whose run published the artifact (see notes)
-      publish-run-id:
-        type: string
-        required: false
-        description: Run that published the artifact (see notes)
 
 metadata:
   stages/v1alpha1:
