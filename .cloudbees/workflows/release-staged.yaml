@@ -59,6 +59,8 @@ jobs:
           URL: ${{ cloudbees.api.url }}
           # Personal access token for the v4 API (secret of the pro-lola environment)
           PAT: ${{ secrets.PAT }}
+          # Base URL of the Unify UI, including the top-level organization slug
+          UNIFY_UI_URL: https://cloudbees.io/cloudbees-support
         run: |
           set -eu
           printf '%s' "$MANIFEST" > /tmp/manifest.json
@@ -110,8 +112,7 @@ jobs:
           # api_error <file> <heading> <path>: write the failed call to the evidence
           api_error() {
             {
-              echo "### $2"
-              echo
+              if [ -n "$2" ]; then echo "### $2"; echo; fi
               echo "**ERROR: HTTP $HTTP** from \`$3\`"
               echo
               echo '```json'
@@ -130,42 +131,28 @@ jobs:
             esac
           }
 
-          # tests_section <file> <heading> <path>: the test-results response lists gzip files behind
-          # presigned URLs. Each file is downloaded (no Authorization header, the URL carries the
-          # signature, which is never written to the evidence), decompressed and added to the evidence.
+          # tests_section <file> <heading> <path>: link to the run's Test Results in Unify plus the
+          # download link of each test result file (presigned URL returned by the API).
           tests_section() {
+            {
+              echo "### $2"
+              echo
+              if [ -n "${TEST_URL:-}" ]; then echo "- Test results in Unify: [open the run's Test Results]($TEST_URL)"; fi
+            } >> "$1"
             api_fetch "$3"
             case "$HTTP" in
               2??) ;;
-              *) api_error "$1" "$2" "$3"; return 0 ;;
+              *) echo >> "$1"; api_error "$1" "" "$3"; return 0 ;;
             esac
-            FILES=$(printf '%s' "$BODY" | jq -r '(.files // [])[] | [.fileName, .downloadUrl, (.uploadedAt // "n/a")] | @tsv')
-            { echo "### $2"; echo; } >> "$1"
+            FILES=$(printf '%s' "$BODY" | jq -r '(.files // [])[] | [.fileName, .downloadUrl, (.uploadedAt // "n/a"), (.expiresAt // "n/a")] | @tsv')
             if [ -z "$FILES" ]; then
-              { echo "No test result files for this run."; echo; } >> "$1"
+              { echo "- Test result files: none"; echo; } >> "$1"
               return 0
             fi
-            printf '%s\n' "$FILES" | while IFS="$(printf '\t')" read -r FN DU UP; do
-              echo "#### File: $FN"
-              echo
-              echo "- Uploaded: $UP"
-              if curl --silent --show-error --fail -m 120 -o /tmp/tr.gz "$DU" 2>/dev/null && gunzip -c /tmp/tr.gz > /tmp/tr.out 2>/dev/null; then
-                SIZE=$(wc -c < /tmp/tr.out | tr -d ' ')
-                if jq -e . /tmp/tr.out >/dev/null 2>&1; then KIND=json
-                elif head -c 1 /tmp/tr.out | grep -q '<'; then KIND=xml
-                else KIND=text; fi
-                echo "- Format: $KIND, $SIZE bytes"
-                echo
-                echo "\`\`\`$KIND"
-                if [ "$KIND" = json ]; then jq . /tmp/tr.out | head -c 20000; else head -c 20000 /tmp/tr.out; fi
-                echo
-                echo '```'
-                [ "$SIZE" -gt 20000 ] && echo "(truncated to the first 20000 bytes)"
-              else
-                echo "- **ERROR**: could not download or decompress the file (the presigned URL may have expired)"
-              fi
-              echo
+            printf '%s\n' "$FILES" | while IFS="$(printf '\t')" read -r FN DU UP EXP; do
+              echo "- Test result file: [download]($DU) (uploaded $UP, link expires $EXP)"
             done >> "$1"
+            echo >> "$1"
           }
 
           # security_section <file> <heading> <path>: summary by severity plus a table of the findings
@@ -233,6 +220,15 @@ jobs:
             # The run that published the artifact
             PUB_COMPONENT=$(printf '%s' "$INFO" | jq -r '.publishedBy.componentId // empty')
             PUB_RUN=$(printf '%s' "$INFO" | jq -r '.publishedBy.runId // empty')
+            PUB_AUTOMATION=$(printf '%s' "$INFO" | jq -r '.publishedBy.automationId // empty')
+            PUB_ATTEMPT=$(printf '%s' "$INFO" | jq -r '.publishedBy.runAttempt // empty')
+            PUB_ORG=$(printf '%s' "$INFO" | jq -r '.publishedBy.organizationId // .organizationId // empty')
+
+            # Link to the run's Test Results in Unify
+            TEST_URL=""
+            if [ -n "$PUB_COMPONENT" ] && [ -n "$PUB_RUN" ] && [ -n "$PUB_AUTOMATION" ] && [ -n "$PUB_ORG" ]; then
+              TEST_URL="$UNIFY_UI_URL/$PUB_ORG/components/$PUB_COMPONENT/runs/$PUB_AUTOMATION/$PUB_RUN/${PUB_ATTEMPT:-1}/logs?componentId=$PUB_COMPONENT&workflowId=$PUB_AUTOMATION&organizationId=$PUB_ORG&job=Run+tests&activeTab=Test+Results"
+            fi
 
             {
               echo "### $COMP"
