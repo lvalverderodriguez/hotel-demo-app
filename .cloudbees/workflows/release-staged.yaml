@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 1440
     with:
       # Replace with the release managers (user IDs or e-mail addresses).
-      approvers: "release.manager@example.com"
+      approvers: "lvalverderodriguez@cloudbees.com"
       disallowLaunchByUser: true
       instructions: |
         Review the evidence published by the Evidence stage (Run > Jobs > Evidence):
